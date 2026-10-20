@@ -1,12 +1,17 @@
+#define _GNU_SOURCE
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -42,7 +47,92 @@ struct backend_seatd {
 	char seat_name[MAX_SEAT_LEN];
 };
 
+#define INHERITED_FD_NOT_SET (-2)
+
+static int seatd_inherited_fd(void) {
+	const char *value = getenv("SEATD_FD");
+	if (value == NULL) {
+		return INHERITED_FD_NOT_SET;
+	}
+
+	errno = 0;
+	char *end = NULL;
+	long parsed = strtol(value, &end, 10);
+	int parse_errno = errno;
+	if (unsetenv("SEATD_FD") == -1) {
+		return -1;
+	}
+	if (parse_errno != 0 || end == value || *end != '\0' || parsed < 0 || parsed > INT_MAX) {
+		errno = EINVAL;
+		return -1;
+	}
+	int fd = (int)parsed;
+
+	int socket_type = 0;
+	socklen_t socket_type_len = sizeof socket_type;
+	if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &socket_type, &socket_type_len) == -1) {
+		goto invalid;
+	}
+	if (socket_type != SOCK_STREAM) {
+		errno = ENOTSOCK;
+		goto invalid;
+	}
+	struct sockaddr_storage peer_addr;
+	socklen_t peer_addr_len = sizeof peer_addr;
+	if (getpeername(fd, (struct sockaddr *)&peer_addr, &peer_addr_len) == -1) {
+		goto invalid;
+	}
+	if (peer_addr.ss_family != AF_UNIX) {
+		errno = EAFNOSUPPORT;
+		goto invalid;
+	}
+
+	uid_t peer_uid;
+#ifdef __linux__
+	struct ucred credentials;
+	socklen_t credentials_len = sizeof credentials;
+	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &credentials, &credentials_len) == -1) {
+		goto invalid;
+	}
+	peer_uid = credentials.uid;
+#else
+	gid_t peer_gid;
+	if (getpeereid(fd, &peer_uid, &peer_gid) == -1) {
+		goto invalid;
+	}
+#endif
+	if (peer_uid != 0) {
+		errno = EACCES;
+		goto invalid;
+	}
+
+	int descriptor_flags = fcntl(fd, F_GETFD);
+	if (descriptor_flags == -1 || fcntl(fd, F_SETFD, descriptor_flags | FD_CLOEXEC) == -1) {
+		goto invalid;
+	}
+	int status_flags = fcntl(fd, F_GETFL);
+	if (status_flags == -1 || fcntl(fd, F_SETFL, status_flags | O_NONBLOCK) == -1) {
+		goto invalid;
+	}
+	return fd;
+
+invalid:;
+	int saved_errno = errno;
+	close(fd);
+	errno = saved_errno;
+	return -1;
+}
+
 static int seatd_connect(void) {
+	int inherited = seatd_inherited_fd();
+	if (inherited >= 0) {
+		return inherited;
+	}
+	if (inherited != INHERITED_FD_NOT_SET) {
+		log_errorf("Invalid inherited SEATD_FD: %s", strerror(errno));
+		return -1;
+	}
+
 	union {
 		struct sockaddr_un unix;
 		struct sockaddr generic;
@@ -372,6 +462,24 @@ error:
 	return -1;
 }
 
+static void queue_opener_handle(struct backend_seatd *backend) {
+#ifdef __linux__
+#ifdef SYS_pidfd_open
+	int pidfd = (int)syscall(SYS_pidfd_open, getpid(), 0);
+	if (pidfd == -1) {
+		log_infof("Could not open optional self pidfd; using socket lifetime: %s",
+			  strerror(errno));
+		return;
+	}
+	if (connection_put_fd(&backend->connection, pidfd) == -1) {
+		log_infof("Could not queue optional self pidfd; using socket lifetime: %s",
+			  strerror(errno));
+		close(pidfd);
+	}
+#endif
+#endif
+}
+
 static struct libseat *_open_seat(const struct libseat_seat_listener *listener, void *data, int fd) {
 	assert(listener != NULL);
 	assert(listener->enable_seat != NULL && listener->disable_seat != NULL);
@@ -393,6 +501,7 @@ static struct libseat *_open_seat(const struct libseat_seat_listener *listener, 
 		.opcode = CLIENT_OPEN_SEAT,
 		.size = 0,
 	};
+	queue_opener_handle(backend);
 	if (conn_put(backend, &header, sizeof header) == -1 || read_until_response(backend) == -1) {
 		res = -errno;
 		goto backend_error;

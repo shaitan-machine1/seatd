@@ -255,6 +255,19 @@ foreach name, value : tests
 		include_directories: [include_directories('.', 'include')]))
 endforeach
 
+if with_seatd
+	test('invalid-inherited-fd', executable(
+		'invalid_inherited_fd_test',
+		['tests/invalid-inherited-fd.c'],
+		link_with: [lib],
+		include_directories: [include_directories('.', 'include')]))
+	test('inherited-fd', executable(
+		'inherited_fd_test',
+		['tests/inherited-fd.c'],
+		link_with: [lib],
+		include_directories: [include_directories('.', 'include')]))
+endif
+
 if with_server
 	scdoc = dependency('scdoc', required: get_option('man-pages'), version: '>= 1.9.7', native: true)
 else
