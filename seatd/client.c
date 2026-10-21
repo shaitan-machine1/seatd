@@ -155,9 +155,11 @@ static int client_send_error(struct client *client, int error_code) {
 }
 
 static char *client_get_seat_name(struct client *client) {
-	(void)client;
-	// TODO: Look up seat for session.
-	return "seat0";
+	if (linked_list_empty(&client->server->seats)) {
+		return NULL;
+	}
+	struct seat *seat = (struct seat *)client->server->seats.next;
+	return seat->seat_name;
 }
 
 static int handle_open_seat(struct client *client) {

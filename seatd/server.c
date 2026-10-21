@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -14,6 +15,7 @@
 #include "client.h"
 #include "log.h"
 #include "poller.h"
+#include "protocol.h"
 #include "seat.h"
 #include "server.h"
 #include "terminal.h"
@@ -21,6 +23,27 @@
 static int server_handle_vt_acq(int signal, void *data);
 static int server_handle_vt_rel(int signal, void *data);
 static int server_handle_kill(int signal, void *data);
+
+static bool valid_seat_name(const char *name) {
+	size_t length = strlen(name);
+	if (length < 4 || length >= MAX_SEAT_LEN || strncmp(name, "seat", 4) != 0) {
+		return false;
+	}
+	for (const unsigned char *character = (const unsigned char *)name + 4; *character != '\0';
+	     character++) {
+		if (!isalnum(*character) && *character != '_' && *character != '-') {
+			return false;
+		}
+	}
+	return true;
+}
+
+static struct seat *server_primary_seat(struct server *server) {
+	if (linked_list_empty(&server->seats)) {
+		return NULL;
+	}
+	return (struct seat *)server->seats.next;
+}
 
 int server_init(struct server *server) {
 	if (poller_init(&server->poller) == -1) {
@@ -39,16 +62,33 @@ int server_init(struct server *server) {
 		return -1;
 	}
 
-	char *vtenv = getenv("SEATD_VTBOUND");
-
-	// TODO: create more seats:
-	struct seat *seat = seat_create("seat0", vtenv == NULL || strcmp(vtenv, "1") == 0);
-	if (seat == NULL) {
+	const char *vtenv = getenv("SEATD_VTBOUND");
+	const char *seat_name = getenv("SEATD_SEAT");
+	if (seat_name == NULL) {
+		seat_name = "seat0";
+	}
+	if (!valid_seat_name(seat_name)) {
+		log_errorf("Invalid SEATD_SEAT value: %s", seat_name);
+		errno = EINVAL;
 		server_finish(server);
 		return -1;
 	}
 
+	// One configured seat per server process. Additional seats are created by
+	// running additional independently supervised seatd processes.
+	struct seat *seat = seat_create(seat_name, vtenv == NULL || strcmp(vtenv, "1") == 0);
+	if (seat == NULL) {
+		server_finish(server);
+		return -1;
+	}
 	linked_list_insert(&server->seats, &seat->link);
+
+	const char *devices = getenv("SEATD_DEVICES");
+	if (devices != NULL && seat_set_device_allowlist(seat, devices) == -1) {
+		log_errorf("Invalid SEATD_DEVICES value: %s", strerror(errno));
+		server_finish(server);
+		return -1;
+	}
 	server->running = true;
 	return 0;
 }
@@ -80,7 +120,7 @@ struct seat *server_get_seat(struct server *server, const char *seat_name) {
 static int server_handle_vt_acq(int signal, void *data) {
 	(void)signal;
 	struct server *server = data;
-	struct seat *seat = server_get_seat(server, "seat0");
+	struct seat *seat = server_primary_seat(server);
 	if (seat == NULL) {
 		return -1;
 	}
@@ -92,7 +132,7 @@ static int server_handle_vt_acq(int signal, void *data) {
 static int server_handle_vt_rel(int signal, void *data) {
 	(void)signal;
 	struct server *server = data;
-	struct seat *seat = server_get_seat(server, "seat0");
+	struct seat *seat = server_primary_seat(server);
 	if (seat == NULL) {
 		return -1;
 	}

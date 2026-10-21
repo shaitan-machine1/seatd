@@ -216,7 +216,7 @@ libseat = declare_dependency(
 meson.override_dependency('libseat', libseat)
 
 if with_server
-	executable(
+	seatd_executable = executable(
 		'seatd',
 		[ server_files, 'seatd/seatd.c' ],
 		include_directories: [include_directories('.', 'include')],
@@ -269,6 +269,18 @@ if with_seatd
 endif
 
 if with_server
+	test('seat-allowlist', executable(
+		'seat_allowlist_test',
+		['tests/seat-allowlist.c', server_files],
+		include_directories: [include_directories('.', 'include')],
+		dependencies: [realtime]))
+	configured_server_test = executable(
+		'configured_server_test',
+		['tests/configured-server.c'],
+		link_with: [lib],
+		include_directories: [include_directories('.', 'include')])
+	test('configured-server', configured_server_test, args: [seatd_executable])
+
 	scdoc = dependency('scdoc', required: get_option('man-pages'), version: '>= 1.9.7', native: true)
 else
 	scdoc = disabler()

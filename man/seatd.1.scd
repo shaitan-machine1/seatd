@@ -39,12 +39,26 @@ such as displays and input devices in a multi-session, multi-seat environment.
 seatd operates over a UNIX domain socket, with *libseat* providing the
 client-side of the protocol.
 
-The location of the socket for seatd is set at compile-time.
+The socket location is set at compile-time unless overridden by *SEATD_SOCK*.
 
 # ENVIRONMENT
 
+*SEATD_SEAT*
+	Name reported by this server instance. Defaults to "seat0". One seat is
+	served per seatd process.
+
+*SEATD_SOCK*
+	Listening socket path for this server instance. When set, the socket is
+	created mode 0600 unless *-u* or *-g* requests shared ownership.
+
 *SEATD_VTBOUND*
 	If set to "0", the seat will not be bound to a VT.
+
+*SEATD_DEVICES*
+	Comma-separated static allowlist of canonical device-node paths. Each
+	opened fd is checked against the configured path, device type and device
+	number before it is returned. An empty value denies all device opens. An
+	unset value preserves the unrestricted upstream behavior.
 
 # SEE ALSO
 

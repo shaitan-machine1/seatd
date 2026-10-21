@@ -13,6 +13,20 @@ No pidfd or ancillary descriptor is attached to the seatd protocol. Socket EOF
 is authoritative, so launchers must close every duplicate outside the intended
 compositor lineage.
 
+The standalone seatd server also accepts one-seat-per-process configuration:
+
+- `SEATD_SEAT` selects the reported seat name (default `seat0`);
+- `SEATD_SOCK` selects a root-only listening socket instead of the compiled
+  default;
+- existing `SEATD_VTBOUND=0` disables VT binding; and
+- `SEATD_DEVICES` is a comma-separated, static device-node allowlist. An empty
+  value denies every device; an unset value preserves upstream unrestricted
+  behavior.
+
+Allowed paths are canonicalized at startup. Every opened fd must match both the
+configured canonical path and its snapshotted device type/number before it is
+returned to a client. Restart the process to change the allowlist.
+
 Build and test as upstream:
 
 ```sh

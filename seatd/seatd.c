@@ -17,7 +17,7 @@
 
 #define LISTEN_BACKLOG 16
 
-static int open_socket(const char *path, int uid, int gid) {
+static int open_socket(const char *path, int uid, int gid, bool private_socket) {
 	union {
 		struct sockaddr_un unix;
 		struct sockaddr generic;
@@ -29,7 +29,12 @@ static int open_socket(const char *path, int uid, int gid) {
 	}
 
 	addr.unix.sun_family = AF_UNIX;
-	strncpy(addr.unix.sun_path, path, sizeof addr.unix.sun_path - 1);
+	if (*path == '\0' || strlen(path) >= sizeof addr.unix.sun_path) {
+		log_errorf("Socket path is empty or too long: %s", path);
+		errno = ENAMETOOLONG;
+		goto error;
+	}
+	strcpy(addr.unix.sun_path, path);
 	socklen_t size = offsetof(struct sockaddr_un, sun_path) + strlen(addr.unix.sun_path);
 	if (bind(fd, &addr.generic, size) == -1) {
 		log_errorf("Could not bind socket: %s", strerror(errno));
@@ -39,8 +44,8 @@ static int open_socket(const char *path, int uid, int gid) {
 		log_errorf("Could not listen on socket: %s", strerror(errno));
 		goto error;
 	}
-	if (uid != -1 || gid != -1) {
-		if (chmod(path, 0770) == -1) {
+	if (uid != -1 || gid != -1 || private_socket) {
+		if (chmod(path, private_socket && uid == -1 && gid == -1 ? 0600 : 0770) == -1) {
 			log_errorf("Could not chmod socket: %s", strerror(errno));
 			goto error;
 		}
@@ -152,20 +157,28 @@ int main(int argc, char *argv[]) {
 	log_init();
 	libseat_set_log_level(level);
 
+	const char *configured_socket = getenv("SEATD_SOCK");
+	const bool private_socket = configured_socket != NULL;
+	const char *socket_path = private_socket ? configured_socket : SEATD_DEFAULTPATH;
+	if (*socket_path == '\0') {
+		log_error("SEATD_SOCK must not be empty");
+		return 1;
+	}
+
 	struct stat st;
-	if (lstat(SEATD_DEFAULTPATH, &st) == 0) {
+	if (lstat(socket_path, &st) == 0) {
 		if (!S_ISSOCK(st.st_mode)) {
 			log_errorf("Non-socket file found at socket path %s, refusing to start",
-				   SEATD_DEFAULTPATH);
+				   socket_path);
 			return 1;
 		} else if (!unlink_existing_socket) {
 			log_errorf("Socket file found at socket path %s, refusing to start",
-				   SEATD_DEFAULTPATH);
+				   socket_path);
 			return 1;
 		} else {
 			// We only do this if the socket path is not user specified
-			log_infof("Removing leftover socket at %s", SEATD_DEFAULTPATH);
-			if (unlink(SEATD_DEFAULTPATH) == -1) {
+			log_infof("Removing leftover socket at %s", socket_path);
+			if (unlink(socket_path) == -1) {
 				log_errorf("Could not remove leftover socket: %s", strerror(errno));
 				return 1;
 			}
@@ -179,7 +192,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	int ret = 1;
-	int socket_fd = open_socket(SEATD_DEFAULTPATH, uid, gid);
+	int socket_fd = open_socket(socket_path, uid, gid, private_socket);
 	if (socket_fd == -1) {
 		log_error("Could not create server socket");
 		goto error_server;
@@ -210,8 +223,8 @@ int main(int argc, char *argv[]) {
 	ret = 0;
 
 error_socket:
-	if (unlink(SEATD_DEFAULTPATH) == -1) {
-		log_errorf("Could not remove socket: %s", strerror(errno));
+	if (unlink(socket_path) == -1) {
+		log_errorf("Could not remove socket %s: %s", socket_path, strerror(errno));
 	}
 error_server:
 	server_finish(&server);

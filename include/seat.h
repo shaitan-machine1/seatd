@@ -27,6 +27,13 @@ struct seat_device {
 	enum seat_device_type type;
 };
 
+struct seat_allowed_device {
+	struct linked_list link; // seat::allowed_devices
+	char *path;
+	mode_t file_type;
+	dev_t device_number;
+};
+
 struct seat {
 	struct linked_list link; // server::seats
 	char *seat_name;
@@ -36,10 +43,14 @@ struct seat {
 
 	bool vt_bound;
 	int cur_vt;
+	bool device_allowlist_enabled;
+	struct linked_list allowed_devices;
 };
 
 struct seat *seat_create(const char *name, bool vt_bound);
 void seat_destroy(struct seat *seat);
+int seat_set_device_allowlist(struct seat *seat, const char *value);
+bool seat_device_allowed(const struct seat *seat, const char *path, int fd);
 
 int seat_add_client(struct seat *seat, struct client *client);
 void seat_remove_client(struct client *client);

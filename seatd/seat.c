@@ -37,6 +37,7 @@ struct seat *seat_create(const char *seat_name, bool vt_bound) {
 		return NULL;
 	}
 	linked_list_init(&seat->clients);
+	linked_list_init(&seat->allowed_devices);
 	seat->vt_bound = vt_bound;
 	seat->seat_name = strdup(seat_name);
 	seat->cur_vt = 0;
@@ -59,9 +60,107 @@ void seat_destroy(struct seat *seat) {
 		assert(client->seat == seat);
 		client_destroy(client);
 	}
+	while (!linked_list_empty(&seat->allowed_devices)) {
+		struct seat_allowed_device *device =
+			(struct seat_allowed_device *)seat->allowed_devices.next;
+		linked_list_remove(&device->link);
+		free(device->path);
+		free(device);
+	}
 	linked_list_remove(&seat->link);
 	free(seat->seat_name);
 	free(seat);
+}
+
+int seat_set_device_allowlist(struct seat *seat, const char *value) {
+	assert(seat);
+	assert(value);
+	if (seat->device_allowlist_enabled || !linked_list_empty(&seat->allowed_devices)) {
+		errno = EALREADY;
+		return -1;
+	}
+	seat->device_allowlist_enabled = true;
+	if (*value == '\0') {
+		return 0;
+	}
+
+	const char *cursor = value;
+	while (*cursor != '\0') {
+		const char *separator = strchr(cursor, ',');
+		size_t length = separator == NULL ? strlen(cursor) : (size_t)(separator - cursor);
+		if (length == 0 || length >= PATH_MAX) {
+			errno = EINVAL;
+			return -1;
+		}
+		char *configured = strndup(cursor, length);
+		if (configured == NULL) {
+			return -1;
+		}
+		char canonical[PATH_MAX];
+		if (realpath(configured, canonical) == NULL) {
+			log_errorf("Could not canonicalize configured device %s: %s", configured,
+				   strerror(errno));
+			free(configured);
+			return -1;
+		}
+		free(configured);
+
+		struct stat statbuf;
+		if (stat(canonical, &statbuf) == -1) {
+			return -1;
+		}
+		if (!S_ISCHR(statbuf.st_mode) && !S_ISBLK(statbuf.st_mode)) {
+			log_errorf("Configured path %s is not a device node", canonical);
+			errno = ENODEV;
+			return -1;
+		}
+
+		struct seat_allowed_device *device = calloc(1, sizeof(*device));
+		if (device == NULL) {
+			return -1;
+		}
+		device->path = strdup(canonical);
+		if (device->path == NULL) {
+			free(device);
+			return -1;
+		}
+		device->file_type = statbuf.st_mode & S_IFMT;
+		device->device_number = statbuf.st_rdev;
+		linked_list_insert(&seat->allowed_devices, &device->link);
+
+		if (separator == NULL) {
+			break;
+		}
+		cursor = separator + 1;
+		if (*cursor == '\0') {
+			errno = EINVAL;
+			return -1;
+		}
+	}
+	return 0;
+}
+
+bool seat_device_allowed(const struct seat *seat, const char *path, int fd) {
+	assert(seat);
+	assert(path);
+	if (!seat->device_allowlist_enabled) {
+		return true;
+	}
+
+	struct stat statbuf;
+	if (fstat(fd, &statbuf) == -1) {
+		return false;
+	}
+	for (const struct linked_list *elem = seat->allowed_devices.next;
+	     elem != &seat->allowed_devices; elem = elem->next) {
+		const struct seat_allowed_device *device = (const struct seat_allowed_device *)elem;
+		if (strcmp(path, device->path) == 0 &&
+		    (statbuf.st_mode & S_IFMT) == device->file_type &&
+		    statbuf.st_rdev == device->device_number) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static void seat_update_vt(struct seat *seat) {
@@ -384,6 +483,12 @@ struct seat_device *seat_open_device(struct client *client, const char *path) {
 	int fd = open(sanitized_path, O_RDWR | O_NOCTTY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
 	if (fd == -1) {
 		log_errorf("Could not open file: %s", strerror(errno));
+		return NULL;
+	}
+	if (!seat_device_allowed(seat, sanitized_path, fd)) {
+		log_errorf("Device %s is not allowed on %s", sanitized_path, seat->seat_name);
+		close(fd);
+		errno = EPERM;
 		return NULL;
 	}
 
