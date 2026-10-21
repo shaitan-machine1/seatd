@@ -11,7 +11,10 @@ rather than falling back to `SEATD_SOCK`.
 
 No pidfd or ancillary descriptor is attached to the seatd protocol. Socket EOF
 is authoritative, so launchers must close every duplicate outside the intended
-compositor lineage.
+compositor lineage. The seatd backend reports EOF as a terminal disconnection
+after dispatching any complete events already buffered; later dispatch calls
+continue to fail rather than leaving a dead readable fd in the caller's event
+loop.
 
 The standalone seatd server also accepts one-seat-per-process configuration:
 

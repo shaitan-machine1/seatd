@@ -520,6 +520,10 @@ int client_handle_connection(int fd, uint32_t mask, void *data) {
 				goto fail;
 			}
 		}
+		if (connection_eof(&client->connection)) {
+			log_info("Client disconnected");
+			goto fail;
+		}
 	}
 
 	return 0;

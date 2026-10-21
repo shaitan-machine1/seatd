@@ -207,7 +207,11 @@ int connection_read(struct connection *connection) {
 	if (decode_cmsg(&connection->fds_in, &msg) != 0) {
 		return -1;
 	}
-	connection->in.head += len;
+	if (len == 0) {
+		connection->read_eof = true;
+	} else {
+		connection->in.head += len;
+	}
 
 	return connection_buffer_size(&connection->in);
 }
@@ -301,6 +305,10 @@ void connection_close_fds(struct connection *connection) {
 
 size_t connection_pending(struct connection *connection) {
 	return connection_buffer_size(&connection->in);
+}
+
+bool connection_eof(struct connection *connection) {
+	return connection->read_eof;
 }
 
 void connection_restore(struct connection *connection, size_t count) {

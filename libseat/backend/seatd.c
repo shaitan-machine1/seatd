@@ -365,23 +365,27 @@ static int poll_connection(struct backend_seatd *backend, int timeout) {
 		return (errno == EAGAIN || errno == EINTR) ? 0 : -1;
 	}
 
-	if (fd.revents & (POLLERR | POLLHUP)) {
-		set_error(backend);
-		errno = EPIPE;
-		return -1;
-	}
-
 	int len = 0;
 	if (fd.revents & POLLIN) {
 		len = connection_read(&backend->connection);
-		if (len == 0) {
-			set_error(backend);
-			errno = EIO;
-			return -1;
-		} else if (len == -1 && errno != EAGAIN) {
+		if (len == -1 && errno != EAGAIN) {
 			set_error(backend);
 			return -1;
 		}
+		if (connection_eof(&backend->connection) && len == 0) {
+			errno = EPIPE;
+			set_error(backend);
+			return -1;
+		}
+		if (len > 0) {
+			return len;
+		}
+	}
+
+	if (fd.revents & (POLLERR | POLLHUP)) {
+		errno = EPIPE;
+		set_error(backend);
+		return -1;
 	}
 
 	return len;
@@ -438,22 +442,33 @@ static int dispatch(struct libseat *base, int timeout) {
 		read = poll_connection(backend, timeout);
 	}
 
-	if (read == 0) {
-		return predispatch;
-	} else if (read == -1 && errno != EAGAIN) {
+	if (read == -1 && errno != EAGAIN) {
 		log_errorf("Could not %s from connection: %s", immediate_read ? "read" : "poll",
 			   strerror(errno));
 		goto error;
 	}
 
-	int postdispatch = read_and_queue(backend, NULL);
-	if (postdispatch == -1) {
-		log_errorf("Could not read and queue events: %s", strerror(errno));
-		goto error;
+	int postdispatch = 0;
+	if (read > 0) {
+		postdispatch = read_and_queue(backend, NULL);
+		if (postdispatch == -1) {
+			log_errorf("Could not read and queue events: %s", strerror(errno));
+			goto error;
+		}
+		postdispatch += execute_events(backend);
 	}
-	postdispatch += execute_events(backend);
 
-	return predispatch + postdispatch;
+	int dispatched = predispatch + postdispatch;
+	if (connection_eof(&backend->connection)) {
+		errno = EPIPE;
+		set_error(backend);
+		if (dispatched == 0) {
+			log_error("Seatd connection closed");
+			goto error;
+		}
+	}
+
+	return dispatched;
 
 error:
 	return -1;

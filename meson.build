@@ -266,6 +266,11 @@ if with_seatd
 		['tests/inherited-fd.c'],
 		link_with: [lib],
 		include_directories: [include_directories('.', 'include')]))
+	test('seatd-eof', executable(
+		'seatd_eof_test',
+		['tests/seatd-eof.c'],
+		link_with: [lib],
+		include_directories: [include_directories('.', 'include')]))
 endif
 
 if with_server

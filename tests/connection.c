@@ -150,6 +150,36 @@ static void test_restore(void) {
 	close(fds[1]);
 }
 
+static void test_eof(void) {
+	int fds[2];
+	test_assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+	struct connection connection = {.fd = fds[0]};
+	close(fds[1]);
+
+	test_assert(connection_read(&connection) == 0);
+	test_assert(connection_eof(&connection));
+	test_assert(connection_pending(&connection) == 0);
+	close(fds[0]);
+}
+
+static void test_eof_preserves_buffered_data(void) {
+	int fds[2];
+	test_assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+	struct connection connection = {.fd = fds[0]};
+	char value = 42;
+	test_assert(write(fds[1], &value, sizeof value) == sizeof value);
+	test_assert(connection_read(&connection) == sizeof value);
+	test_assert(!connection_eof(&connection));
+	close(fds[1]);
+
+	test_assert(connection_read(&connection) == sizeof value);
+	test_assert(connection_eof(&connection));
+	char result = 0;
+	test_assert(connection_get(&connection, &result, sizeof result) == sizeof result);
+	test_assert(result == value);
+	close(fds[0]);
+}
+
 static void test_send_variable_sequence(void) {
 	int fds[2];
 	socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
@@ -194,5 +224,7 @@ int main(int argc, char *argv[]) {
 	test_run(test_overflow_write);
 	test_run(test_send_one_int);
 	test_run(test_restore);
+	test_run(test_eof);
+	test_run(test_eof_preserves_buffered_data);
 	test_run(test_send_variable_sequence);
 }

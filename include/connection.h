@@ -18,6 +18,7 @@ struct connection {
 	struct connection_buffer fds_in, fds_out;
 	int fd;
 	bool want_flush;
+	bool read_eof;
 };
 
 int connection_read(struct connection *connection);
@@ -27,6 +28,7 @@ int connection_put(struct connection *connection, const void *data, size_t count
 int connection_put_fd(struct connection *connection, int fd);
 
 size_t connection_pending(struct connection *connection);
+bool connection_eof(struct connection *connection);
 int connection_get(struct connection *connection, void *dst, size_t count);
 int connection_get_fd(struct connection *connection, int *fd);
 void connection_restore(struct connection *connection, size_t count);
