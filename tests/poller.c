@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "poller.h"
@@ -179,6 +180,44 @@ static void test_poller_multi_signal(void) {
 	poller_finish(&poller);
 }
 
+static int test_timer_event(void *data) {
+	int *count = data;
+	(*count)++;
+	return 0;
+}
+
+static void test_poller_timer(void) {
+	struct poller poller;
+	test_assert(poller_init(&poller) == 0);
+
+	struct timespec start, finish;
+	int count = 0;
+	test_assert(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+	test_assert(poller_add_timer(&poller, 20, test_timer_event, &count) != NULL);
+	test_assert(poller_poll(&poller) == 0);
+	test_assert(clock_gettime(CLOCK_MONOTONIC, &finish) == 0);
+	test_assert(count == 1);
+	long elapsed_ms = (finish.tv_sec - start.tv_sec) * 1000L +
+		(finish.tv_nsec - start.tv_nsec) / 1000000L;
+	test_assert(elapsed_ms >= 15);
+
+	int fds[2];
+	test_assert(pipe(fds) == 0);
+	struct test_fd evd = {0};
+	test_assert(poller_add_fd(&poller, fds[0], EVENT_READABLE, test_fd_event, &evd) != NULL);
+	struct event_source_timer *cancelled =
+		poller_add_timer(&poller, 0, test_timer_event, &count);
+	test_assert(cancelled != NULL);
+	test_assert(event_source_timer_destroy(cancelled) == 0);
+	test_assert(write(fds[1], "\0", 1) == 1);
+	test_assert(poller_poll(&poller) == 0);
+	test_assert(count == 1);
+
+	close(fds[0]);
+	close(fds[1]);
+	poller_finish(&poller);
+}
+
 int main(int argc, char *argv[]) {
 	(void)argc;
 	(void)argv;
@@ -188,4 +227,5 @@ int main(int argc, char *argv[]) {
 	test_run(test_poller_multi_fd);
 	test_run(test_poller_single_signal);
 	test_run(test_poller_multi_signal);
+	test_run(test_poller_timer);
 }

@@ -24,6 +24,11 @@ struct event_source_fd;
  */
 struct event_source_signal;
 
+/*
+ * The one-shot timer class. This must be created by poller_add_timer.
+ */
+struct event_source_timer;
+
 /**
  * The callback type used by event_source_fd, passed to poller_add_fd.
  */
@@ -65,11 +70,23 @@ struct event_source_signal_impl {
 int event_source_signal_destroy(struct event_source_signal *event_source);
 
 /**
+ * The callback type used by event_source_timer.
+ */
+typedef int (*event_source_timer_func_t)(void *data);
+
+/**
+ * Cancels a one-shot timer. A timer is destroyed automatically before its
+ * callback is invoked.
+ */
+int event_source_timer_destroy(struct event_source_timer *event_source);
+
+/**
  * The poller base class. This must be created by poller_create.
  */
 struct poller {
 	struct linked_list signals;
 	struct linked_list fds;
+	struct linked_list timers;
 
 	int signal_fds[2];
 	struct pollfd *pollfds;
@@ -120,6 +137,13 @@ struct event_source_fd *poller_add_fd(struct poller *poller, int fd, uint32_t ma
  */
 struct event_source_signal *poller_add_signal(struct poller *poller, int signal,
 					      event_source_signal_func_t func, void *data);
+
+/**
+ * Creates a one-shot monotonic timer. The callback runs after at least
+ * timeout_ms milliseconds unless the timer is destroyed first.
+ */
+struct event_source_timer *poller_add_timer(struct poller *poller, int timeout_ms,
+					    event_source_timer_func_t func, void *data);
 
 /**
  * Poll the poller. I don't know what you were expecting.

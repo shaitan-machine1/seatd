@@ -274,6 +274,18 @@ if with_server
 		['tests/seat-allowlist.c', server_files],
 		include_directories: [include_directories('.', 'include')],
 		dependencies: [realtime]))
+	test('seat-vt', executable(
+		'seat_vt_test',
+		[
+			'tests/seat-vt.c',
+			'common/linked_list.c',
+			'common/log.c',
+			'seatd/poller.c',
+			'seatd/seat.c',
+		],
+		include_directories: [include_directories('.', 'include')],
+		dependencies: [realtime],
+		c_args: ['-DSEATD_VT_RELEASE_TIMEOUT_MS=20']))
 	configured_server_test = executable(
 		'configured_server_test',
 		['tests/configured-server.c'],

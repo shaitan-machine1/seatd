@@ -15,10 +15,16 @@
 #include "hidraw.h"
 #include "linked_list.h"
 #include "log.h"
+#include "poller.h"
 #include "protocol.h"
 #include "seat.h"
+#include "server.h"
 #include "terminal.h"
 #include "wscons.h"
+
+#ifndef SEATD_VT_RELEASE_TIMEOUT_MS
+#define SEATD_VT_RELEASE_TIMEOUT_MS 2000
+#endif
 
 /*
  * seat_create creates a new seat with the given name, which may be VT-bound.
@@ -66,6 +72,10 @@ void seat_destroy(struct seat *seat) {
 		linked_list_remove(&device->link);
 		free(device->path);
 		free(device);
+	}
+	if (seat->vt_release_timer != NULL) {
+		event_source_timer_destroy(seat->vt_release_timer);
+		seat->vt_release_timer = NULL;
 	}
 	linked_list_remove(&seat->link);
 	free(seat->seat_name);
@@ -227,6 +237,51 @@ static int vt_ack(struct seat *seat, bool release) {
 	return 0;
 }
 
+static void seat_cancel_vt_release_timer(struct seat *seat) {
+	if (seat->vt_release_timer == NULL) {
+		return;
+	}
+	event_source_timer_destroy(seat->vt_release_timer);
+	seat->vt_release_timer = NULL;
+}
+
+static int seat_finish_vt_release(struct seat *seat) {
+	if (!seat->vt_release_pending) {
+		return 0;
+	}
+	seat_cancel_vt_release_timer(seat);
+	seat->vt_release_pending = false;
+	int result = vt_ack(seat, true);
+	seat->cur_vt = -1;
+	return result;
+}
+
+static int seat_vt_release_timeout(void *data) {
+	struct seat *seat = data;
+	seat->vt_release_timer = NULL;
+	if (!seat->vt_release_pending) {
+		return 0;
+	}
+
+	struct client *client = seat->active_client;
+	if (client != NULL) {
+		log_errorf("Client %d did not disable within %d ms; forcing VT release",
+			   client->session, SEATD_VT_RELEASE_TIMEOUT_MS);
+		client->state = CLIENT_DISABLED;
+		seat->active_client = NULL;
+	}
+	return seat_finish_vt_release(seat);
+}
+
+static int seat_arm_vt_release_timer(struct seat *seat, struct client *client) {
+	assert(client->server != NULL);
+	assert(seat->vt_release_timer == NULL);
+	seat->vt_release_timer = poller_add_timer(&client->server->poller,
+						 SEATD_VT_RELEASE_TIMEOUT_MS,
+						 seat_vt_release_timeout, seat);
+	return seat->vt_release_timer == NULL ? -1 : 0;
+}
+
 /*
  * seat_activate opens the next client on the seat, assuming no client is
  * currently active.
@@ -246,6 +301,9 @@ static int vt_ack(struct seat *seat, bool release) {
 static int seat_activate(struct seat *seat) {
 	if (seat->active_client != NULL) {
 		return 0;
+	}
+	if (seat->vt_release_pending) {
+		return -1;
 	}
 
 	struct client *next_client = NULL;
@@ -373,7 +431,11 @@ void seat_remove_client(struct client *client) {
 	bool was_current = seat->active_client == client;
 	if (was_current) {
 		seat->active_client = NULL;
-		seat_activate(seat);
+		if (seat->vt_release_pending) {
+			seat_finish_vt_release(seat);
+		} else {
+			seat_activate(seat);
+		}
 	}
 
 	if (seat->vt_bound) {
@@ -749,6 +811,9 @@ int seat_ack_disable_client(struct client *client) {
 	}
 
 	seat->active_client = NULL;
+	if (seat->vt_release_pending) {
+		return seat_finish_vt_release(seat);
+	}
 	seat_activate(seat);
 
 	// If we're VT-bound, we've either de-activated a client on a foreign
@@ -830,6 +895,11 @@ int seat_vt_activate(struct seat *seat) {
 		log_debug("VT activation on non VT-bound seat, ignoring");
 		return -1;
 	}
+	if (seat->vt_release_pending) {
+		log_error("VT acquired while a release is still pending");
+		errno = EBUSY;
+		return -1;
+	}
 	seat_update_vt(seat);
 	log_debug("Activating VT");
 	vt_ack(seat, false);
@@ -840,23 +910,35 @@ int seat_vt_activate(struct seat *seat) {
 }
 
 /*
- * seat_vt_release is called when a VT release signal is received. We respond
- * by disabling our current client and acking the signal to let the kernel
- * proceed with the switch.
+ * seat_vt_release is called when a VT release signal is received. The kernel
+ * release is acknowledged only after the active client has disabled,
+ * disconnected or exceeded the bounded disable timeout.
  */
 int seat_vt_release(struct seat *seat) {
 	if (!seat->vt_bound) {
 		log_debug("VT release request on non VT-bound seat, ignoring");
 		return -1;
 	}
+	if (seat->vt_release_pending) {
+		log_debug("VT release is already pending");
+		return 0;
+	}
 	seat_update_vt(seat);
+	seat->vt_release_pending = true;
 
 	log_debug("Releasing VT");
-	if (seat->active_client != NULL) {
-		seat_disable_client(seat->active_client);
+	struct client *client = seat->active_client;
+	if (client == NULL) {
+		return seat_finish_vt_release(seat);
 	}
 
-	vt_ack(seat, true);
-	seat->cur_vt = -1;
-	return 0;
+	int disable_result = seat_disable_client(client);
+	if (seat_arm_vt_release_timer(seat, client) == -1) {
+		log_errorf("Could not arm VT release timeout: %s", strerror(errno));
+		client->state = CLIENT_DISABLED;
+		seat->active_client = NULL;
+		seat_finish_vt_release(seat);
+		return -1;
+	}
+	return disable_result;
 }

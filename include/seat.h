@@ -8,6 +8,7 @@
 #include "linked_list.h"
 
 struct client;
+struct event_source_timer;
 
 enum seat_device_type {
 	SEAT_DEVICE_TYPE_NORMAL,
@@ -43,6 +44,8 @@ struct seat {
 
 	bool vt_bound;
 	int cur_vt;
+	bool vt_release_pending;
+	struct event_source_timer *vt_release_timer;
 	bool device_allowlist_enabled;
 	struct linked_list allowed_devices;
 };

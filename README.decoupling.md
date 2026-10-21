@@ -27,6 +27,11 @@ Allowed paths are canonicalized at startup. Every opened fd must match both the
 configured canonical path and its snapshotted device type/number before it is
 returned to a client. Restart the process to change the allowlist.
 
+On a VT-bound seat, seatd does not acknowledge a kernel VT release until the
+old client acknowledges disable or disconnects. A monotonic two-second timeout
+forces the old client disabled and completes the release if it is unresponsive,
+so serialization cannot wedge VT switching indefinitely.
+
 Build and test as upstream:
 
 ```sh

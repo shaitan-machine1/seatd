@@ -1,12 +1,14 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "linked_list.h"
@@ -36,6 +38,16 @@ struct event_source_signal {
 
 	struct poller *poller;
 	bool raised;
+	bool killed;
+};
+
+struct event_source_timer {
+	struct linked_list link; // poller::timers
+	event_source_timer_func_t func;
+	struct timespec deadline;
+	void *data;
+
+	struct poller *poller;
 	bool killed;
 };
 
@@ -83,6 +95,7 @@ int poller_init(struct poller *poller) {
 
 	linked_list_init(&poller->fds);
 	linked_list_init(&poller->signals);
+	linked_list_init(&poller->timers);
 	poller->pollfds = NULL;
 	poller->pollfds_len = 0;
 	poller->dirty = true;
@@ -109,6 +122,12 @@ int poller_finish(struct poller *poller) {
 
 		linked_list_remove(&bps->link);
 		free(bps);
+	}
+	while (!linked_list_empty(&poller->timers)) {
+		struct event_source_timer *timer =
+			(struct event_source_timer *)poller->timers.next;
+		linked_list_remove(&timer->link);
+		free(timer);
 	}
 	free(poller->pollfds);
 	global_poller = NULL;
@@ -200,6 +219,44 @@ int event_source_signal_destroy(struct event_source_signal *event_source) {
 	return 0;
 }
 
+struct event_source_timer *poller_add_timer(struct poller *poller, int timeout_ms,
+					    event_source_timer_func_t func, void *data) {
+	if (timeout_ms < 0) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	struct event_source_timer *timer = calloc(1, sizeof(*timer));
+	if (timer == NULL) {
+		return NULL;
+	}
+	if (clock_gettime(CLOCK_MONOTONIC, &timer->deadline) == -1) {
+		free(timer);
+		return NULL;
+	}
+	timer->deadline.tv_sec += timeout_ms / 1000;
+	timer->deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+	if (timer->deadline.tv_nsec >= 1000000000L) {
+		timer->deadline.tv_sec++;
+		timer->deadline.tv_nsec -= 1000000000L;
+	}
+	timer->func = func;
+	timer->data = data;
+	timer->poller = poller;
+	linked_list_insert(&poller->timers, &timer->link);
+	poller->dirty = true;
+	return timer;
+}
+
+int event_source_timer_destroy(struct event_source_timer *event_source) {
+	if (event_source == NULL || event_source->killed) {
+		return 0;
+	}
+	event_source->killed = true;
+	event_source->poller->dirty = true;
+	return 0;
+}
+
 static int event_mask_to_poll_mask(uint32_t event_mask) {
 	int poll_mask = 0;
 	if (event_mask & EVENT_READABLE) {
@@ -272,7 +329,60 @@ static int regenerate(struct poller *poller) {
 		}
 	}
 
+	for (struct linked_list *elem = poller->timers.next; elem != &poller->timers;
+	     elem = elem->next) {
+		struct event_source_timer *timer = (struct event_source_timer *)elem;
+		if (timer->killed) {
+			elem = elem->prev;
+			linked_list_remove(&timer->link);
+			free(timer);
+		}
+	}
+
 	return 0;
+}
+
+static int timespec_compare(const struct timespec *left, const struct timespec *right) {
+	if (left->tv_sec != right->tv_sec) {
+		return left->tv_sec < right->tv_sec ? -1 : 1;
+	}
+	if (left->tv_nsec != right->tv_nsec) {
+		return left->tv_nsec < right->tv_nsec ? -1 : 1;
+	}
+	return 0;
+}
+
+static int timer_timeout_ms(struct poller *poller) {
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) == -1) {
+		return -1;
+	}
+
+	int timeout = -1;
+	for (struct linked_list *elem = poller->timers.next; elem != &poller->timers;
+	     elem = elem->next) {
+		struct event_source_timer *timer = (struct event_source_timer *)elem;
+		if (timer->killed) {
+			continue;
+		}
+		if (timespec_compare(&timer->deadline, &now) <= 0) {
+			return 0;
+		}
+
+		time_t seconds = timer->deadline.tv_sec - now.tv_sec;
+		long nanoseconds = timer->deadline.tv_nsec - now.tv_nsec;
+		if (nanoseconds < 0) {
+			seconds--;
+			nanoseconds += 1000000000L;
+		}
+		int64_t milliseconds = (int64_t)seconds * 1000 +
+			(nanoseconds + 999999L) / 1000000L;
+		int candidate = milliseconds > INT_MAX ? INT_MAX : (int)milliseconds;
+		if (timeout == -1 || candidate < timeout) {
+			timeout = candidate;
+		}
+	}
+	return timeout;
 }
 
 static void dispatch(struct poller *poller) {
@@ -305,6 +415,21 @@ static void dispatch(struct poller *poller) {
 		bpfd->func(poller->pollfds[bpfd->pollfd_idx].fd, poll_mask_to_event_mask(revents),
 			   bpfd->data);
 	}
+
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) == -1) {
+		return;
+	}
+	for (struct linked_list *elem = poller->timers.next; elem != &poller->timers;
+	     elem = elem->next) {
+		struct event_source_timer *timer = (struct event_source_timer *)elem;
+		if (timer->killed || timespec_compare(&timer->deadline, &now) > 0) {
+			continue;
+		}
+		timer->killed = true;
+		poller->dirty = true;
+		timer->func(timer->data);
+	}
 }
 
 int poller_poll(struct poller *poller) {
@@ -315,10 +440,13 @@ int poller_poll(struct poller *poller) {
 		poller->dirty = false;
 	}
 
-	while (poll(poller->pollfds, poller->fd_event_sources, -1) == -1) {
-		if (errno != EINTR) {
-			return -1;
-		}
+	int result;
+	do {
+		int timeout = timer_timeout_ms(poller);
+		result = poll(poller->pollfds, poller->fd_event_sources, timeout);
+	} while (result == -1 && errno == EINTR);
+	if (result == -1) {
+		return -1;
 	}
 
 	dispatch(poller);
