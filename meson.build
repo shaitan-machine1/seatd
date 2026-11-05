@@ -123,10 +123,11 @@ server_files = [
 ]
 
 with_seatd = get_option('libseat-seatd') == 'enabled'
+with_multiseatd = get_option('libseat-multiseatd') == 'enabled'
 with_builtin = get_option('libseat-builtin') == 'enabled'
 with_server = get_option('server') == 'enabled'
 
-if with_seatd or with_builtin
+if with_seatd or with_builtin or with_multiseatd
 	private_files += 'libseat/backend/seatd.c'
 endif
 
@@ -134,6 +135,12 @@ libseat_c_args = ['-DLIBSEAT=1']
 
 if with_seatd
 	libseat_c_args += '-DSEATD_ENABLED=1'
+endif
+
+if with_multiseatd
+	libseat_c_args += '-DMULTISEATD_ENABLED=1'
+	private_files += 'libseat/backend/multiseatd.c'
+	private_deps += dependency('dbus-1')
 endif
 
 logind = disabler()
@@ -182,6 +189,7 @@ lib = library(
 	[ 'libseat/libseat.c', 'libseat/backend/noop.c' ],
 	soversion: '@0@'.format(libseat_soversion),
 	link_with: private_lib,
+	dependencies: private_deps,
 	include_directories: [include_directories('.', 'include')],
 	install: true,
 	link_args: symbols_flag,
@@ -193,6 +201,7 @@ install_headers('include/libseat.h')
 
 libseat_vars = {
 	'have_seatd': with_seatd.to_string(),
+	'have_multiseatd': with_multiseatd.to_string(),
 	'have_logind': logind.found().to_string(),
 	'have_builtin': with_builtin.to_string(),
 }
@@ -273,6 +282,32 @@ if with_seatd
 		include_directories: [include_directories('.', 'include')]))
 endif
 
+if with_multiseatd
+	native_test_args = ['-UNDEBUG']
+	if not with_seatd and not with_builtin and not logind.found()
+		native_test_args += '-DMULTISEATD_ONLY=1'
+	endif
+	test('multiseatd-name', executable(
+		'multiseatd_name_test',
+		['tests/multiseatd-name.c', 'libseat/backend/multiseatd.c', 'common/log.c'],
+		c_args: native_test_args,
+		link_with: [lib],
+		dependencies: private_deps,
+		include_directories: [include_directories('.', 'include')]))
+	if host_machine.system() == 'linux'
+		bootstrap_test = executable(
+			'multiseatd_bootstrap_test',
+			['tests/multiseatd-bootstrap.c'],
+			c_args: ['-UNDEBUG'],
+			link_with: [lib],
+			dependencies: private_deps,
+			include_directories: [include_directories('.', 'include')])
+		test('multiseatd-bootstrap', find_program('dbus-run-session'),
+			args: ['--config-file=' + meson.current_source_dir() / 'tests/multiseatd-bus.conf',
+				'--', bootstrap_test], timeout: 70)
+	endif
+endif
+
 if with_server
 	test('seat-allowlist', executable(
 		'seat_allowlist_test',
@@ -326,6 +361,7 @@ endif
 
 summary({
 	'libseat-seatd': with_seatd,
+	'libseat-multiseatd': with_multiseatd,
 	'libseat-builtin': with_builtin,
 	'libseat-systemd': logind.found() and logind.name() == 'libsystemd',
 	'libseat-elogind': logind.found() and logind.name() == 'libelogind',

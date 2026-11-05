@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "backend.h"
@@ -18,6 +19,11 @@
 #include "linked_list.h"
 #include "log.h"
 #include "protocol.h"
+
+#ifdef MULTISEATD_ENABLED
+#include "multiseatd.h"
+const struct seat_impl multiseatd_impl;
+#endif
 
 #ifdef BUILTIN_ENABLED
 #include "poller.h"
@@ -40,6 +46,7 @@ struct backend_seatd {
 	struct linked_list pending_events;
 	bool awaiting_pong;
 	bool error;
+	int64_t open_deadline;
 
 	char seat_name[MAX_SEAT_LEN];
 };
@@ -160,11 +167,15 @@ static int seatd_connect(void) {
 
 static struct backend_seatd *backend_seatd_from_libseat_backend(struct libseat *base) {
 	assert(base);
+	bool known = base->impl == &seatd_impl;
 #ifdef BUILTIN_ENABLED
-	assert(base->impl == &seatd_impl || base->impl == &builtin_impl);
-#else
-	assert(base->impl == &seatd_impl);
+	known = known || base->impl == &builtin_impl;
 #endif
+#ifdef MULTISEATD_ENABLED
+	known = known || base->impl == &multiseatd_impl;
+#endif
+	assert(known);
+	(void)known;
 	return (struct backend_seatd *)base;
 }
 
@@ -404,7 +415,23 @@ static int read_until_response(struct backend_seatd *backend) {
 		if (opcode != 0) {
 			break;
 		}
-		if (poll_connection(backend, -1) == -1) {
+		int timeout = -1;
+		if (backend->open_deadline != 0) {
+			struct timespec now;
+			if (clock_gettime(CLOCK_MONOTONIC, &now) == -1) {
+				set_error(backend);
+				return -1;
+			}
+			int64_t remaining = backend->open_deadline -
+				((int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000);
+			if (remaining <= 0) {
+				errno = ETIMEDOUT;
+				set_error(backend);
+				return -1;
+			}
+			timeout = (int)remaining;
+		}
+		if (poll_connection(backend, timeout) == -1) {
 			log_errorf("Could not poll connection: %s", strerror(errno));
 			return -1;
 		}
@@ -474,7 +501,8 @@ error:
 	return -1;
 }
 
-static struct libseat *_open_seat(const struct libseat_seat_listener *listener, void *data, int fd) {
+static struct libseat *_open_seat(const struct libseat_seat_listener *listener, void *data, int fd,
+				  const struct seat_impl *impl, const char *expected_seat) {
 	assert(listener != NULL);
 	assert(listener->enable_seat != NULL && listener->disable_seat != NULL);
 	struct backend_seatd *backend = calloc(1, sizeof(struct backend_seatd));
@@ -487,10 +515,18 @@ static struct libseat *_open_seat(const struct libseat_seat_listener *listener, 
 	backend->seat_listener = listener;
 	backend->seat_listener_data = data;
 	backend->connection.fd = fd;
-	backend->base.impl = &seatd_impl;
+	backend->base.impl = impl;
 	linked_list_init(&backend->pending_events);
 
 	int res = 0;
+	if (expected_seat != NULL) {
+		struct timespec now;
+		if (clock_gettime(CLOCK_MONOTONIC, &now) == -1) {
+			res = -errno;
+			goto backend_error;
+		}
+		backend->open_deadline = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000 + 10000;
+	}
 	struct proto_header header = {
 		.opcode = CLIENT_OPEN_SEAT,
 		.size = 0,
@@ -534,6 +570,12 @@ static struct libseat *_open_seat(const struct libseat_seat_listener *listener, 
 		goto backend_error;
 	}
 
+	if (expected_seat != NULL && strcmp(backend->seat_name, expected_seat) != 0) {
+		log_error("multiseatd returned the wrong seat");
+		res = -EACCES;
+		goto backend_error;
+	}
+	backend->open_deadline = 0;
 	execute_events(backend);
 	return &backend->base;
 
@@ -549,8 +591,19 @@ static struct libseat *open_seat(const struct libseat_seat_listener *listener, v
 		return NULL;
 	}
 
-	return _open_seat(listener, data, fd);
+	return _open_seat(listener, data, fd, &seatd_impl, NULL);
 }
+
+#ifdef MULTISEATD_ENABLED
+static struct libseat *multiseatd_open_seat(const struct libseat_seat_listener *listener, void *data) {
+	char expected_seat[MAX_SEAT_LEN];
+	int fd = multiseatd_connect(expected_seat);
+	if (fd == -1) {
+		return NULL;
+	}
+	return _open_seat(listener, data, fd, &multiseatd_impl, expected_seat);
+}
+#endif
 
 static int close_seat(struct libseat *base) {
 	int res = 0;
@@ -774,6 +827,20 @@ const struct seat_impl seatd_impl = {
 	.dispatch = dispatch,
 };
 
+#ifdef MULTISEATD_ENABLED
+const struct seat_impl multiseatd_impl = {
+	.open_seat = multiseatd_open_seat,
+	.disable_seat = disable_seat,
+	.close_seat = close_seat,
+	.seat_name = seat_name,
+	.open_device = open_device,
+	.close_device = close_device,
+	.switch_session = switch_session,
+	.get_fd = get_fd,
+	.dispatch = dispatch,
+};
+#endif
+
 #ifdef BUILTIN_ENABLED
 
 static struct libseat *builtin_open_seat(const struct libseat_seat_listener *listener, void *data) {
@@ -822,7 +889,7 @@ static struct libseat *builtin_open_seat(const struct libseat_seat_listener *lis
 	} else {
 		close(fds[0]);
 		int fd = fds[1];
-		return _open_seat(listener, data, fd);
+		return _open_seat(listener, data, fd, &builtin_impl, NULL);
 	}
 }
 

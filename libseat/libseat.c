@@ -14,8 +14,14 @@ extern const struct seat_impl seatd_impl;
 extern const struct seat_impl logind_impl;
 extern const struct seat_impl builtin_impl;
 extern const struct seat_impl noop_impl;
+#ifdef MULTISEATD_ENABLED
+extern const struct seat_impl multiseatd_impl;
+#endif
 
 static const struct named_backend impls[] = {
+#ifdef MULTISEATD_ENABLED
+	{"multiseatd", &multiseatd_impl},
+#endif
 #ifdef SEATD_ENABLED
 	{"seatd", &seatd_impl},
 #endif
@@ -30,7 +36,7 @@ static const struct named_backend impls[] = {
 	{NULL, NULL},
 };
 
-#if !defined(SEATD_ENABLED) && !defined(LOGIND_ENABLED) && !defined(BUILTIN_ENABLED)
+#if !defined(SEATD_ENABLED) && !defined(LOGIND_ENABLED) && !defined(BUILTIN_ENABLED) && !defined(MULTISEATD_ENABLED)
 #error At least one backend must be enabled
 #endif
 
@@ -65,7 +71,12 @@ struct libseat *libseat_open_seat(const struct libseat_seat_listener *listener, 
 
 	struct libseat *backend = NULL;
 	for (const struct named_backend *iter = impls; iter->backend != NULL; iter++) {
-		if (iter->backend == &noop_impl) {
+		if (iter->backend == &noop_impl
+#ifdef MULTISEATD_ENABLED
+		    || iter->backend == &multiseatd_impl
+#endif
+		) {
+			// Native authority is consumed only by explicit backend selection.
 			continue;
 		}
 		backend = iter->backend->open_seat(listener, data);
