@@ -18,6 +18,7 @@ static void event(struct libseat *seat, void *data) {
 int main(void) {
 	char service[256];
 	const char *vectors[][2] = {
+		{"seat", "org.SGLogin.Multiseatd1.Seat_seat"},
 		{"seat0", "org.SGLogin.Multiseatd1.Seat_seat0"},
 		{"seat1", "org.SGLogin.Multiseatd1.Seat_seat1"},
 		{"seat-a_b", "org.SGLogin.Multiseatd1.Seat_seat_2da_5fb"},

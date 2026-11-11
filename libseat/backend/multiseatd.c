@@ -247,7 +247,7 @@ int multiseatd_connect(char seat[MAX_SEAT_LEN]) {
 	}
 	if (!dbus_message_has_signature(reply, "hu") ||
 	    !dbus_message_get_args(reply, NULL, DBUS_TYPE_UNIX_FD, &endpoint,
-		DBUS_TYPE_UINT32, &handle, DBUS_TYPE_INVALID)) {
+		DBUS_TYPE_UINT32, &handle, DBUS_TYPE_INVALID) || handle > INT_MAX) {
 		errno = EBADMSG;
 		goto done;
 	}

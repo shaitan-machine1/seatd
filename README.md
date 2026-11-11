@@ -27,6 +27,23 @@ Each backend can be compile-time included and is runtime auto-detected or manual
 
 Which backend is in use is transparent to the application, providing a simple common interface.
 
+### Explicit multiseatd bootstrap
+
+`-Dlibseat-multiseatd=enabled` builds an optional libdbus-dependent native backend.
+Select **exactly** `LIBSEAT_BACKEND=multiseatd`; it is excluded from automatic
+probing and never falls back on explicit failure. A trusted host supplies the
+explicit `XDG_SEAT` and one-shot inherited `MULTISEATD_AUTHORITY_FD >= 3`.
+The backend consumes/unsets authority, authenticates the root per-seat bus owner,
+creates a fresh connection and uses the ordinary shared seatd framing/operations.
+FD/peer/seat/handle validation precedes callbacks. A second native open needs
+fresh deliberate authority. No client runtime or background bus thread exists.
+
+The compositor's pre-open loaders/helpers are trusted with full context authority,
+not merely a connection capability. For a stricter boundary, have the trusted
+host use seat-launch: it removes authority before compositor exec and supplies
+`LIBSEAT_BACKEND=seatd` / `SEATD_FD` instead. Neither mode owns a Linux terminal.
+Existing seatd/socket/builtin behavior and the libseat ABI/SONAME are unchanged.
+
 ## Why not (e)logind?
 
 systemd-logind is not portable, and being part of the systemd project, it cannot be used in an environment not based on or compatible with systemd.

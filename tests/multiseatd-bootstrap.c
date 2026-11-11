@@ -211,7 +211,7 @@ static void mock_service(int ready, uint64_t cookie, const char *mode) {
 			assert(endpoint >= 0);
 		}
 		reply = dbus_message_new_method_return(request);
-		dbus_uint32_t handle = (dbus_uint32_t)sockets[0];
+		dbus_uint32_t handle = strcmp(mode, "bad-handle") == 0 ? UINT32_MAX : (dbus_uint32_t)sockets[0];
 		assert(reply != NULL);
 		assert(dbus_message_append_args(reply, DBUS_TYPE_UNIX_FD, &endpoint,
 			DBUS_TYPE_UINT32, &handle, DBUS_TYPE_INVALID));
@@ -413,7 +413,7 @@ int main(int argc, char **argv) {
 		return 0;
 	}
 	assert(argc == 1);
-	const char *modes[] = {"good", "wrong-seat", "bad-signature", "bad-endpoint", "bad-peer",
+	const char *modes[] = {"good", "wrong-seat", "bad-signature", "bad-endpoint", "bad-peer", "bad-handle",
 		"service-error", "nonroot-owner", "owner-loss", "service-timeout", "silent-wire"};
 	/* This process is single-threaded and each child is joined: no FD-count race. */
 	size_t initial = descriptor_count();
